@@ -2,8 +2,19 @@
 #include <fstream>
 #include <cstdint>
 #include <cstring>
+#include <zlib.h>
 
 using namespace std;
+
+// Meta data of image
+struct m_data {
+    uint8_t channels;
+    uint8_t bitDepth;
+    uint32_t width;
+    uint32_t height;
+    uint8_t color;  
+};
+
 
 uint32_t swapEdian(uint32_t value) {
     return (((value & 0xFF000000) >> 24) |
