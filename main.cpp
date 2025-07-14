@@ -1,16 +1,57 @@
 #include <iostream>
 #include <fstream>
-#include <cstdint>
+#include <cstdint> // uint8_t, uint32_t
 #include <cstring>
-#include <zlib.h>
+#include <zlib.h> // inflate & deflate algorithms
+#include <vector> // std::vector
+#include <utility> // std::pair
+
 
 using namespace std;
 
 // Inflated size for data = (bytes_per_scanline + 1) * height
 // + 1 because PNG includes filter byte at its start (1 byte per line)
 // bytes_per_scanline = ceil((width * bits_per_pixel) / 8)
-//bits_per_pixel = bit_depth * channels
+// bits_per_pixel = bit_depth * channels
 
+
+class Image {
+    vector<pair<unsigned char*, uint32_t>> chunks; // Pointer to the begging of IDAT file and it's size
+    uint32_t size;
+    public:
+        Image();
+
+        void addChunk(pair<unsigned char*, uint32_t> p);
+        void addChunk(unsigned char* data, uint32_t size);
+        vector<pair<unsigned char*, uint32_t>> getChunks();
+        uint32_t getSize();
+};
+
+Image::Image() {
+    this->chunks.reserve(5);
+    this->size = 0;
+}
+
+void Image::addChunk(pair<unsigned char*, uint32_t> p) {
+    cout << "called 0\n";
+    this->chunks.emplace_back(p);
+    this->size += p.second;
+}
+
+void Image::addChunk(unsigned char* data, uint32_t size) {
+    cout << "called 1\n" << "size: " << size << endl;
+    this->chunks.emplace_back(pair<unsigned char*, uint32_t>(data, size));
+    this->size += size;
+    cout << "this->size: " << this->size << endl;
+}
+
+vector<pair<unsigned char*, uint32_t>> Image::getChunks() {
+    return this->chunks;
+}
+
+uint32_t Image::getSize() {
+    return this->size;
+}
 
 // Meta data of image
 struct m_data {
@@ -121,13 +162,13 @@ int main() {
         fs.read(reinterpret_cast<char*>(sign), sizeof(sign));
         // Displaying signature of file
         for (int i = 0; i < 8; ++i)
-            cout << static_cast<int>(sign[i]) << ' ';
+        cout << static_cast<int>(sign[i]) << ' ';
         cout << endl;
         
         unsigned char type[5] = {0}; // Setting all characters to 0
         unsigned char crc[4];
         m_data metadata = {};
-
+        Image encodedImage;
         do {
             uint32_t chunkLength = 0;
 
@@ -152,8 +193,12 @@ int main() {
             
             cout << "Lenght: " << chunkLength  << " bytes" << endl;
             cout << '\n';
+            if (strcmp(reinterpret_cast<const char*>(type), "IDAT") == 0)
+                encodedImage.addChunk(data, chunkLength); // Adding data from IDAT chunk into total image
+
             if (strcmp(reinterpret_cast<const char*>(type), "IHDR") == 0)
                 metadata = getMetadata(data, chunkLength);
+            
 
     } while (strcmp(reinterpret_cast<const char*>(type), "IEND") != 0);
         
@@ -165,6 +210,18 @@ int main() {
         cout << "filter: " << static_cast<int>(metadata.filter) << endl;
         cout << "interlance: " << static_cast<int>(metadata.interlance) << endl;
         cout << "channels: " << static_cast<int>(metadata.channels) << endl;
+
+        auto image = encodedImage.getChunks();
+        int totalSize = encodedImage.getSize();
+        unsigned char encodedData[totalSize];
+        for (auto i : image) {
+            strcat(reinterpret_cast<char*>(encodedData), reinterpret_cast<const char*>(i.first));
+        }
+        for (auto i = 0; i < totalSize; ++i) {
+            cout << *(encodedData + i);
+        }
+        cout << endl << totalSize << endl;
+
         fs.close(); // Closing image file
     } else 
         cerr << "Could not open file\n";
