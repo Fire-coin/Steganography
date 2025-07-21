@@ -262,14 +262,17 @@ int main() {
         }
         std::cout << std::dec << "\n"; // reset to decimal output
 
-        delete[] encodedData;
-        // auto image = encodedImage.getChunks();
-        // int totalSize = encodedImage.getSize();
-        // unsigned char encodedData[totalSize];
+        uint32_t inflatedSize = getImageSize(metadata);
 
-        // uint32_t inflatedSize = getImageSize(metadata);
+        unsigned char* inflatedData = decompress(encodedData, totalSize, inflatedSize);
 
-        // unsigned char* inflatedData = decompress(encodedData, totalSize, inflatedSize);
+        for (size_t i = 0; i < inflatedSize; ++i) {
+            std::cout << std::hex << std::setfill('0') << std::setw(2)
+                    << (int)inflatedData[i] << " ";
+            
+            if ((i + 1) % 8 == 0)
+                std::cout << "\n";
+        }
 
         fs.close(); // Closing image file
     } else 
