@@ -5,14 +5,32 @@
 #include <zlib.h> // inflate & deflate algorithms
 #include <vector> // std::vector
 #include <utility> // std::pair
+#include <cmath>
+#include <iomanip> // for std::hex and std::setw
 
 
 using namespace std;
 
-// Inflated size for data = (bytes_per_scanline + 1) * height
-// + 1 because PNG includes filter byte at its start (1 byte per line)
-// bytes_per_scanline = ceil((width * bits_per_pixel) / 8)
-// bits_per_pixel = bit_depth * channels
+
+
+unsigned char* decompress(unsigned char* data, uint32_t size, uint32_t expectedSize) {
+    z_stream strm{};
+    strm.zalloc = Z_NULL;
+    strm.zfree = Z_NULL;
+    strm.opaque = Z_NULL;
+
+    strm.next_in = data;
+    strm.avail_in = size;
+    strm.avail_out = expectedSize;
+    unsigned char* decompressed = new unsigned char[expectedSize];
+    strm.next_out = decompressed;   
+    inflateInit(&strm);
+    inflate(&strm, Z_FINISH);
+    inflateEnd(&strm);
+
+    return decompressed;
+}
+
 
 
 class Image {
@@ -20,10 +38,9 @@ class Image {
     uint32_t size;
     public:
         Image();
-
-        void addChunk(pair<unsigned char*, uint32_t> p);
+        ~Image();
         void addChunk(unsigned char* data, uint32_t size);
-        vector<pair<unsigned char*, uint32_t>> getChunks();
+        const vector<pair<unsigned char*, uint32_t>>& getChunks();
         uint32_t getSize();
 };
 
@@ -32,20 +49,20 @@ Image::Image() {
     this->size = 0;
 }
 
-void Image::addChunk(pair<unsigned char*, uint32_t> p) {
-    cout << "called 0\n";
-    this->chunks.emplace_back(p);
-    this->size += p.second;
+Image::~Image() {
+    for (auto& chunk : this->chunks) {
+        delete[] chunk.first;
+    }
 }
 
 void Image::addChunk(unsigned char* data, uint32_t size) {
-    cout << "called 1\n" << "size: " << size << endl;
-    this->chunks.emplace_back(pair<unsigned char*, uint32_t>(data, size));
+    unsigned char* dataCopy = new unsigned char[size];
+    memcpy(dataCopy, data, size); 
+    this->chunks.emplace_back(pair<unsigned char*, uint32_t>(dataCopy, size));
     this->size += size;
-    cout << "this->size: " << this->size << endl;
 }
 
-vector<pair<unsigned char*, uint32_t>> Image::getChunks() {
+const vector<pair<unsigned char*, uint32_t>>& Image::getChunks() {
     return this->chunks;
 }
 
@@ -152,6 +169,19 @@ m_data getMetadata(const unsigned char* data, uint8_t size) {
     CRC: 4 bytes
 */
 
+// Inflated size for data = (bytes_per_scanline + 1) * height
+// + 1 because PNG includes filter byte at its start (1 byte per line)
+// bytes_per_scanline = ceil((width * bits_per_pixel) / 8)
+// bits_per_pixel = bit_depth * channels
+
+uint32_t getImageSize(m_data& data) {
+    uint32_t bitsPerPixel = data.bitDepth * data.channels;
+    uint32_t bytesPerScanline =  ceil((data.width * bitsPerPixel) / 8);
+    uint32_t inflatedSize = (bytesPerScanline + 1) * data.height;
+
+    return inflatedSize;
+}
+
 int main() {
     fstream fs;
     fs.open("5x4.png", ios::in | ios::binary); // Opening file for reading in binary mod
@@ -211,16 +241,35 @@ int main() {
         cout << "interlance: " << static_cast<int>(metadata.interlance) << endl;
         cout << "channels: " << static_cast<int>(metadata.channels) << endl;
 
-        auto image = encodedImage.getChunks();
-        int totalSize = encodedImage.getSize();
-        unsigned char encodedData[totalSize];
-        for (auto i : image) {
-            strcat(reinterpret_cast<char*>(encodedData), reinterpret_cast<const char*>(i.first));
+        auto chunks = encodedImage.getChunks();
+        uint32_t totalSize = encodedImage.getSize();
+        unsigned char* encodedData = new unsigned char[totalSize];
+        
+        size_t offset = 0;
+
+        for (auto& chunk : chunks) {
+            std::cout << "size: " << chunk.second << endl;
+            memcpy(encodedData + offset, chunk.first, chunk.second);
+            offset += chunk.second;
         }
-        for (auto i = 0; i < totalSize; ++i) {
-            cout << *(encodedData + i);
+
+        for (size_t i = 0; i < totalSize; ++i) {
+            std::cout << std::hex << std::setfill('0') << std::setw(2)
+                    << (int)encodedData[i] << " ";
+            
+            if ((i + 1) % 8 == 0)
+                std::cout << "\n";
         }
-        cout << endl << totalSize << endl;
+        std::cout << std::dec << "\n"; // reset to decimal output
+
+        delete[] encodedData;
+        // auto image = encodedImage.getChunks();
+        // int totalSize = encodedImage.getSize();
+        // unsigned char encodedData[totalSize];
+
+        // uint32_t inflatedSize = getImageSize(metadata);
+
+        // unsigned char* inflatedData = decompress(encodedData, totalSize, inflatedSize);
 
         fs.close(); // Closing image file
     } else 
