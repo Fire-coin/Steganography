@@ -12,6 +12,29 @@
 using namespace std;
 
 
+pair<unsigned char*, uint32_t> compress(unsigned char* data, uint32_t size) {
+    z_stream strm{};
+    strm.zalloc = Z_NULL;
+    strm.zfree = Z_NULL;
+    strm.opaque = Z_NULL;
+
+    strm.next_in = data;
+    strm.avail_in = size;
+    strm.avail_out = size;
+    unsigned char* compressed = new unsigned char[size];
+    strm.next_out = compressed;
+
+    deflateInit(&strm, Z_DEFAULT_COMPRESSION);
+    deflate(&strm, Z_FINISH); // TODO handle if compressed size will be larger than size
+    deflateEnd(&strm);
+
+    cout << "Initial size: " << size << endl;
+    cout << "Size left in stream: " << strm.avail_out << endl;
+    cout << "Compressed size: " << size - strm.avail_out << endl;
+    
+    return pair<unsigned char*, uint32_t>(compressed, size - strm.avail_out);
+}
+
 
 unsigned char* decompress(unsigned char* data, uint32_t size, uint32_t expectedSize) {
     z_stream strm{};
@@ -182,6 +205,54 @@ uint32_t getImageSize(m_data& data) {
     return inflatedSize;
 }
 
+
+void filter(unsigned char* data, uint32_t size, m_data metadata) {
+    uint32_t bpScanline = size / metadata.height;
+    uint32_t bpp = ceil((metadata.bitDepth * metadata.channels) / 8); // Bytes per pixel
+
+    for (int line = 0; line < size / bpScanline; ++line) {
+        int filterType = data[line * bpScanline];
+        for (int byte = line * bpScanline + 1; byte < line * (bpScanline + 1); ++byte) {
+            switch (filterType) {
+                case 0: // None
+                    break;
+                case 1: // Sub
+                    data[byte] += (byte - bpp >= line * bpScanline) ? data[byte - bpp] : 0;
+                    break;
+                case 2: // Up
+                    data[byte] += (byte - bpScanline >= 0) ? data[byte - bpScanline] : 0;
+                    break;
+                case 3: // Average
+                    data[byte] = data[byte] + floor(
+                        ((byte - bpp >= line * bpScanline) ? data[byte - bpp] : 0 +
+                        (byte - bpScanline >= 0) ? data[byte - bpScanline] : 0) / 2
+                    );
+                    break;
+                case 4: // Paeth
+                    int a = (byte - bpp >= line * bpScanline) ? data[byte - bpp] : 0;
+                    int b = (byte - bpScanline >= 0) ? data[byte - bpScanline] : 0;
+                    int c = (byte - bpScanline >= 0 && byte - bpScanline - 1 >= (line - 1) * bpScanline) ? 
+                                    data[byte - bpScanline - 1] : 0;
+                    int p = a + b - c;
+                    int pa = abs(p - a);
+                    int pb = abs(p - b);
+                    int pc = abs(p - c);
+
+                    uint32_t Pr;
+
+                    if (pa <= pb && pa <= pc) Pr = a;
+                    else if (pb <= pc) Pr = b;
+                    else Pr = c;
+                    
+                    data[byte] += Pr;
+                    break;
+            }
+        }
+    }
+}
+
+
+
 int main() {
     fstream fs;
     fs.open("5x4.png", ios::in | ios::binary); // Opening file for reading in binary mod
@@ -252,27 +323,47 @@ int main() {
             memcpy(encodedData + offset, chunk.first, chunk.second);
             offset += chunk.second;
         }
-
+        cout << std::hex;
         for (size_t i = 0; i < totalSize; ++i) {
-            std::cout << std::hex << std::setfill('0') << std::setw(2)
+            cout << std::setfill('0') << std::setw(2)
                     << (int)encodedData[i] << " ";
             
             if ((i + 1) % 8 == 0)
-                std::cout << "\n";
+                cout << "\n";
         }
-        std::cout << std::dec << "\n"; // reset to decimal output
+        cout << std::dec << "\n"; // reset to decimal output
 
         uint32_t inflatedSize = getImageSize(metadata);
 
         unsigned char* inflatedData = decompress(encodedData, totalSize, inflatedSize);
+        
+        // filter(inflatedData, inflatedSize, metadata);
+        auto p = compress(inflatedData, inflatedSize);
+        unsigned char* compressedData = p.first;
+        uint32_t compressedSize = p.second;
 
+
+        cout << std::hex;
         for (size_t i = 0; i < inflatedSize; ++i) {
-            std::cout << std::hex << std::setfill('0') << std::setw(2)
+            cout << std::setfill('0') << std::setw(2)
                     << (int)inflatedData[i] << " ";
             
             if ((i + 1) % 8 == 0)
-                std::cout << "\n";
+                cout << "\n";
         }
+
+        std::cout << endl;
+        cout << std::hex;
+        for (size_t i = 0; i < compressedSize; ++i) {
+            cout << std::setfill('0') << std::setw(2)
+                    << (int)compressedData[i] << " ";
+            
+            if ((i + 1) % 8 == 0)
+                cout << "\n";
+        }
+        // Freeing memory
+        delete inflatedData;
+        delete compressedData;
 
         fs.close(); // Closing image file
     } else 
