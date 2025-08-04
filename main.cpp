@@ -236,61 +236,89 @@ m_data getMetadata(const unsigned char* data, uint8_t size) {
 
 uint32_t getImageSize(m_data& data) {
     uint32_t bitsPerPixel = data.bitDepth * data.channels;
-    uint32_t bytesPerScanline =  ceil((data.width * bitsPerPixel) / 8);
+    uint32_t bytesPerScanline = ceil((data.width * bitsPerPixel) / 8);
     uint32_t inflatedSize = (bytesPerScanline + 1) * data.height;
 
     return inflatedSize;
 }
 
 
-void filter(unsigned char* data, uint32_t size, m_data metadata, bool decode) {
-    uint32_t bpScanline = size / metadata.height;
-    uint32_t bpp = ceil((metadata.bitDepth * metadata.channels) / 8); // Bytes per pixel
-    int factor;
-    if (decode)
-        factor = 1;
-    else 
-        factor = -1;
+void filter(uint8_t* data, const uint32_t size, const m_data& metadata, bool decode) {
+    uint32_t bpScanline = size / metadata.height; // scanline size including filter byte
+    int bpp = (metadata.bitDepth * metadata.channels + 7) / 8; // bytes per pixel
+    int factor = decode ? 1 : -1;
 
-    for (int line = 0; line < size / bpScanline; ++line) {
-        int filterType = data[line * bpScanline];
-        for (int byte = line * bpScanline + 1; byte < line * (bpScanline + 1); ++byte) {
+    uint8_t* filteredData = new uint8_t[size];
+
+    for (uint32_t line = 0; line < metadata.height; ++line) {
+        uint32_t lineStart = line * bpScanline;
+        int filterType = data[lineStart];
+
+        // Copy filter type
+        filteredData[lineStart] = filterType;
+
+        for (uint32_t i = 1; i < bpScanline; ++i) {
+            uint32_t byteIndex = lineStart + i;
+
+            int left = 0, up = 0, upLeft = 0;
+
+            if (i > bpp) {
+                if (decode)
+                    left = filteredData[byteIndex - bpp]; // reconstructed previous pixel
+                else
+                    left = data[byteIndex - bpp]; // original
+            }
+
+            if (line > 0) {
+                if (decode)
+                    up = filteredData[byteIndex - bpScanline]; // reconstructed previous row
+                else
+                    up = data[byteIndex - bpScanline]; // original
+            }
+
+            if (line > 0 && i > bpp) {
+                if (decode)
+                    upLeft = filteredData[byteIndex - bpScanline - bpp]; // reconstructed prev. row and prev. pixel
+                else
+                    upLeft = data[byteIndex - bpScanline - bpp];
+            }
+
+            int predictor = 0;
+
             switch (filterType) {
                 case 0: // None
+                    predictor = 0;
                     break;
                 case 1: // Sub
-                    data[byte] += (byte - bpp >= line * bpScanline) ? data[byte - bpp] * factor: 0;
+                    predictor = left;
                     break;
                 case 2: // Up
-                    data[byte] += (byte - bpScanline >= 0) ? data[byte - bpScanline] * factor : 0;
+                    predictor = up;
                     break;
                 case 3: // Average
-                    data[byte] = data[byte] + floor(
-                        ((byte - bpp >= line * bpScanline) ? data[byte - bpp] : 0 +
-                        (byte - bpScanline >= 0) ? data[byte - bpScanline] : 0) / 2
-                    ) * factor;
+                    predictor = (left + up) / 2;
                     break;
                 case 4: // Paeth
-                    int a = (byte - bpp >= line * bpScanline) ? data[byte - bpp] : 0;
-                    int b = (byte - bpScanline >= 0) ? data[byte - bpScanline] : 0;
-                    int c = (byte - bpScanline >= 0 && byte - bpScanline - 1 >= (line - 1) * bpScanline) ? 
-                                    data[byte - bpScanline - 1] : 0;
-                    int p = a + b - c;
-                    int pa = abs(p - a);
-                    int pb = abs(p - b);
-                    int pc = abs(p - c);
+                {
+                    int p = left + up - upLeft;
+                    int pa = std::abs(p - left);
+                    int pb = std::abs(p - up);
+                    int pc = std::abs(p - upLeft);
 
-                    uint32_t Pr;
-
-                    if (pa <= pb && pa <= pc) Pr = a;
-                    else if (pb <= pc) Pr = b;
-                    else Pr = c;
-                    
-                    data[byte] += Pr * factor;
+                    if (pa <= pb && pa <= pc) predictor = left;
+                    else if (pb <= pc) predictor = up;
+                    else predictor = upLeft;
                     break;
+                }
             }
+
+            int val = (int)data[byteIndex] - factor * predictor;
+            filteredData[byteIndex] = (uint8_t)(val & 0xFF);
         }
     }
+
+    std::memcpy(data, filteredData, size);
+    delete[] filteredData;
 }
 
 
@@ -377,11 +405,6 @@ int main() {
         uint32_t inflatedSize = getImageSize(metadata);
         
         unsigned char* inflatedData = decompress(compressedData, total_IDAT_size, inflatedSize);
-
-        // ofstream fon("NewTux.txt");
-        
-        
-        // fon.close();
         
         // Filtering to get raw data
         filter(inflatedData, inflatedSize, metadata, true);
@@ -389,20 +412,7 @@ int main() {
         // Filtering to potentially get better compression
         filter(inflatedData, inflatedSize, metadata, false);
         
-        // Compressing data back again
         auto p = compress(inflatedData, inflatedSize);
-        // fon.open("NewTux2.txt");
-        // fon << std::hex;
-        // for (size_t i = 0; i < total_IDAT_size; ++i) {
-            //     fon << std::setfill('0') << std::setw(2)
-            //             << (int)inflatedData[i] << " ";
-            
-            //     if ((i + 1) % 30 == 0)
-            //         fon << "\n";
-            // }
-            // fon << std::dec << "\n"; // reset to decimal output
-            
-            // fon.close();
             
             unsigned char* deflatedData = p.first;
             uint32_t deflatedSize = p.second;
@@ -424,71 +434,37 @@ int main() {
                 }
                 uint32_t MAX_SIZE = 8192;
                 
-                // uint32_t edianLength =  swapEdian(deflatedSize);
-                // output.write(reinterpret_cast<char*>(&edianLength), 4);
-                // output.write("IDAT", 4);
-                // output.write(reinterpret_cast<char*>(deflatedData), deflatedSize);
-                // uint32_t crc = swapEdian(calculate_crc("IDAT", deflatedData, deflatedSize));
-                // output.write(reinterpret_cast<char*>(&crc), 4);
-                
-                // ofstream fon("tuxtxt.txt");
 
-                // fon << std::hex;
-                // for (size_t i = 0; i < total_IDAT_size; ++i) {
-                //     fon << std::setfill('0') << std::setw(1)
-                //     << (int)deflatedData[i] << "";
-                    
-                //     // if ((i + 1) % 8 == 0)
-                //     // cout << "\n";
-                // }
-                // fon << std::dec << "\n"; // reset to decimal output
+                size_t offset = 0;
+                uint32_t chunkLength = 0;
+                unsigned char* chunkData = nullptr;
+                // Writing all IDAT chunks
+                for (int i = 0 ; i < int(deflatedSize / MAX_SIZE) + 1; ++i) {
+                    if (deflatedSize < (i + 1) * MAX_SIZE) {
+                        chunkLength = deflatedSize - (i * MAX_SIZE);
+                    } else {
+                        chunkLength = MAX_SIZE;
+                    }
+                    unsigned char* chunkData = new unsigned char[chunkLength];
+                    memcpy(chunkData, (deflatedData + i * MAX_SIZE), chunkLength);
+                    uint32_t edianLength = swapEdian(chunkLength);
+                    // Writing length of IDAT chunk
+                    output.write(reinterpret_cast<char*>(&edianLength), 4);
+                    // Writing chunk type
+                    output.write("IDAT", 4);
+                    // Writing chunk data
+                    output.write(reinterpret_cast<char*>(chunkData), chunkLength);
+                    // Writing chunk crc
+                    uint32_t crc = swapEdian(calculate_crc("IDAT", chunkData, chunkLength));
 
-                // fon << endl << std::hex << crc << endl << std::dec;
-                
-                // fon.close();
-
-            size_t offset = 0;
-            uint32_t chunkLength = 0;
-            unsigned char* chunkData = nullptr;
-            // Writing all IDAT chunks
-            for (int i = 0 ; i < int(deflatedSize / MAX_SIZE) + 1; ++i) {
-                if (deflatedSize < (i + 1) * MAX_SIZE) {
-                    chunkLength = deflatedSize - (i * MAX_SIZE);
-                } else {
-                    chunkLength = MAX_SIZE;
-                }
-                unsigned char* chunkData = new unsigned char[chunkLength];
-                memcpy(chunkData, (deflatedData + i * MAX_SIZE), chunkLength);
-                uint32_t edianLength = swapEdian(chunkLength);
-                // Writing length of IDAT chunk
-                output.write(reinterpret_cast<char*>(&edianLength), 4);
-                // Writing chunk type
-                output.write("IDAT", 4);
-                // Writing chunk data
-                output.write(reinterpret_cast<char*>(chunkData), chunkLength);
-                // Writing chunk crc
-                // uint32_t crc = crc32(0L, Z_NULL, 0);  // Start with 0
-                // crc = crc32(crc, reinterpret_cast<const Bytef*>("IDAT"), 4);  // Type
-                // crc = crc32(crc, chunkData, chunkLength);  // Data
-
-                uint32_t crc = swapEdian(calculate_crc("IDAT", chunkData, chunkLength));
-
-                // unsigned char* crcData = new unsigned char[chunkLength + 4];
-                // memcpy(crcData, "IDAT", 4);
-                // memcpy((crcData + 4), chunkData, chunkLength);
-
-                // uint32_t crc = crc32((char*)crcData, chunkLength);
-                output.write(reinterpret_cast<char*>(&crc), 4);
-                delete[] chunkData;
+                    output.write(reinterpret_cast<char*>(&crc), 4);
+                    delete[] chunkData;
             }
 
-            // Writing IEND chunk
-            // uint32_t crc = crc32(0L, Z_NULL, 0);  // Start with 0
-            // crc = crc32(crc, reinterpret_cast<const Bytef*>("IEND"), 4);  // Type
-            // crc = crc32(crc, nullptr, data_len);  // Data    
+            // Writing IEND chunk    
             uint32_t crc = swapEdian(calculate_crc("IEND", nullptr, 0));
             uint32_t IEND_length = 0;
-            // uint32_t IEND_crc = crc32("IEND", 4);
+
             output.write(reinterpret_cast<char*>(&IEND_length), 4);
             output.write("IEND", 4);
             output.write(reinterpret_cast<char*>(&crc), 4);
@@ -537,7 +513,8 @@ int main() {
         // }
         // Freeing memory
         delete inflatedData;
-        delete deflatedData;	
+        delete deflatedData;
+        
         fs.close(); // Closing image file
     } else 
         cerr << "Could not open file\n";
