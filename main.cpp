@@ -8,6 +8,7 @@
 #include <cmath>
 #include <iomanip> // for std::hex and std::setw
 
+//TODO add option of adding password
 
 using namespace std;
 
@@ -37,7 +38,7 @@ pair<unsigned char*, uint32_t> compress(unsigned char* data, uint32_t size) {
     deflateInit(&strm, Z_BEST_COMPRESSION);
     deflate(&strm, Z_FINISH); // TODO handle if compressed size will be larger than size
     deflateEnd(&strm);
-
+    cout << std::dec;
     cout << "Initial size: " << size << endl;
     cout << "Size left in stream: " << strm.avail_out << endl;
     cout << "Compressed size: " << size - strm.avail_out << endl;
@@ -83,7 +84,7 @@ class Image {
         Image();
         ~Image();
         void addIDATChunk(unsigned char* data, uint32_t size);
-        void addChunk(chunk chunk);
+        void addChunk(const chunk& chunk);
         const vector<pair<unsigned char*, uint32_t>>& getIDATChunks();
         const vector<chunk>& getOtherChunks();
         uint32_t getIDATSize();
@@ -112,8 +113,16 @@ void Image::addIDATChunk(unsigned char* data, uint32_t size) {
     this->IDAT_size += size;
 }
 
-void Image::addChunk(const chunk chunk) {
-    this->other_chunks.emplace_back(chunk);
+void Image::addChunk(const chunk& c) { 
+    chunk tempChunk{};
+
+    tempChunk.length = c.length;
+    memcpy(tempChunk.type, c.type, 4);
+    memcpy(tempChunk.crc, c.crc, 4);
+    tempChunk.data = new uint8_t[c.length];
+    memcpy(tempChunk.data, c.data, c.length);
+
+    this->other_chunks.emplace_back(tempChunk);
 }
 
 
@@ -234,7 +243,7 @@ m_data getMetadata(const unsigned char* data, uint8_t size) {
 // bytes_per_scanline = ceil((width * bits_per_pixel) / 8)
 // bits_per_pixel = bit_depth * channels
 
-uint32_t getImageSize(m_data& data) {
+uint32_t getImageSize(const m_data& data) {
     uint32_t bitsPerPixel = data.bitDepth * data.channels;
     uint32_t bytesPerScanline = ceil((data.width * bitsPerPixel) / 8);
     uint32_t inflatedSize = (bytesPerScanline + 1) * data.height;
@@ -322,6 +331,91 @@ void filter(uint8_t* data, const uint32_t size, const m_data& metadata, bool dec
 }
 
 
+inline uint32_t getMaxMessageSize(const uint32_t rawSize, const m_data& metadata) {
+    return (metadata.height * metadata.width / 8) - (4 * 8); // Only 1 bit per pixel and 4 bytes for message length
+}
+
+
+void encodeMessage(uint8_t* rawData, const uint32_t rawSize, std::string message, const m_data& metadata) {
+    uint32_t bpScanline = rawSize / metadata.height - 1; // scanline size without filter byte
+    uint32_t bpp = (metadata.bitDepth * metadata.channels + 7) / 8; // bytes per pixel
+    uint32_t bitOffset = ((metadata.bitDepth + 7) / 8) - 1; // LSB byte offset in channel
+    uint32_t pixelsPerScanline = bpScanline / bpp;
+
+    uint32_t messageLength = message.length();
+    message = std::string(reinterpret_cast<char*>(&messageLength), 4) + message; // prefix length
+    uint32_t offset = 0;
+    uint32_t pixelIndex = 0;
+    uint32_t scanlineStart = 0;
+
+    for (uint32_t c = 0; c < message.length(); c++) {
+        uint8_t curChar = message[c];
+        for (uint8_t i = 0; i < 8; ++i) {
+            if (pixelIndex >= pixelsPerScanline) {
+                offset++;
+                pixelIndex = 0;
+                scanlineStart = offset * (bpScanline + 1);
+            }
+            uint32_t byteIndex = scanlineStart + pixelIndex * bpp + bitOffset + 1;
+            uint8_t curBit = (curChar & 0x80) ? 1 : 0;
+            rawData[byteIndex] = (rawData[byteIndex] & 0xFE) | curBit;
+            curChar <<= 1;
+            pixelIndex++;
+        }
+    }
+}
+
+std::string decodeMessage(const uint8_t* rawData, const uint32_t rawSize, const m_data& metadata) {
+    std::string output;
+    uint8_t messageLengthStr[4] = {0};
+
+    uint32_t bpScanline = rawSize / metadata.height - 1; // scanline size without filter byte
+    uint32_t bpp = (metadata.bitDepth * metadata.channels + 7) / 8; // bytes per pixel
+    uint32_t bitOffset = ((metadata.bitDepth + 7) / 8) - 1;
+    uint32_t pixelsPerScanline = bpScanline / bpp;
+
+    uint32_t offset = 0;
+    uint32_t pixelIndex = 0;
+    uint32_t scanlineStart = 0;
+
+    // Read message length (4 bytes)
+    for (uint32_t num = 0; num < 4; ++num) {
+        uint8_t byteVal = 0;
+        for (uint32_t i = 0; i < 8; ++i) {
+            if (pixelIndex >= pixelsPerScanline) {
+                offset++;
+                pixelIndex = 0;
+                scanlineStart = offset * (bpScanline + 1);
+            }
+            uint32_t byteIndex = scanlineStart + pixelIndex * bpp + bitOffset + 1;
+            uint8_t curBit = rawData[byteIndex] & 1;
+            byteVal = (byteVal << 1) | curBit;
+            pixelIndex++;
+        }
+        messageLengthStr[num] = byteVal;
+    }
+    uint32_t messageLength = 0;
+    memcpy(&messageLength, messageLengthStr, sizeof(messageLength));
+    cout << "Message length: " << messageLength << endl;
+
+    for (uint32_t i = 0; i < messageLength; ++i) {
+        uint8_t c = 0;
+        for (uint8_t j = 0; j < 8; ++j) {
+            if (pixelIndex >= pixelsPerScanline) {
+                offset++;
+                pixelIndex = 0;
+                scanlineStart = offset * (bpScanline + 1);
+            }
+            uint32_t byteIndex = scanlineStart + pixelIndex * bpp + bitOffset + 1;
+            uint8_t curBit = rawData[byteIndex] & 1;
+            c = (c << 1) | curBit;
+            pixelIndex++;
+        }
+        output += c;
+    }
+    return output;
+}
+
 
 int main() {
     fstream fs;
@@ -364,12 +458,12 @@ int main() {
             fs.read(reinterpret_cast<char*>(crc), 4);
             memcpy(currentChunk.crc, crc, 4);
 
-            for (int i = 0; i < 4; ++i)
-            cout << type[i];
-            cout << endl;
+            // for (int i = 0; i < 4; ++i)
+            // cout << type[i];
+            // cout << endl;
             
-            cout << "Lenght: " << chunkLength  << " bytes" << endl;
-            cout << '\n';
+            // cout << "Lenght: " << chunkLength  << " bytes" << endl;
+            // cout << '\n';
             if (strcmp(reinterpret_cast<const char*>(type), "IDAT") == 0)
                 image.addIDATChunk(data, chunkLength); // Adding data from IDAT chunk into total image
             else
@@ -377,9 +471,9 @@ int main() {
 
             if (strcmp(reinterpret_cast<const char*>(type), "IHDR") == 0)
                 metadata = getMetadata(data, chunkLength);
-            
-
+        
     } while (strcmp(reinterpret_cast<const char*>(type), "IEND") != 0);
+        fs.close();
         //TODO add specification for indexed colors
         cout << "width: " << metadata.width << endl;
         cout << "height: " << metadata.height << endl;
@@ -397,7 +491,6 @@ int main() {
         
         size_t offset = 0;
         for (auto& chunk : IDAT_chunks) {
-            std::cout << "size: " << chunk.second << endl;
             memcpy(compressedData + offset, chunk.first, chunk.second);
             offset += chunk.second;
         }
@@ -408,57 +501,77 @@ int main() {
         
         // Filtering to get raw data
         filter(inflatedData, inflatedSize, metadata, true);
+
+        string message;
+        std::getline(cin, message);
+        std::cout << "Message is: " << message << endl;
+        std::cout << "Length of message is: " << message.length() << endl;
+        uint32_t messageLength = message.length();
+        uint32_t maxMessageLegth = getMaxMessageSize(inflatedSize, metadata);
+        cout << "Max size for message is: " << maxMessageLegth << endl;
+        std::cout << (int)message[0] << endl;
+        const uint32_t MAX_MESSAGE_SIZE = getMaxMessageSize(inflatedSize, metadata);
+        // TODO add check if message fits into image
+        std::cout << endl;
+
+        
+
+        encodeMessage(inflatedData, inflatedSize, message, metadata);
+        string msg = decodeMessage(inflatedData, inflatedSize, metadata);
+
+        std::cout << "Given message: " << msg << endl;
+        cout << "Size of given message: " << msg.length() << endl; 
+
+        std::cout << endl;
         
         // Filtering to potentially get better compression
         filter(inflatedData, inflatedSize, metadata, false);
         
         auto p = compress(inflatedData, inflatedSize);
-            
-            unsigned char* deflatedData = p.first;
-            uint32_t deflatedSize = p.second;
-            
-            fstream output;
-            output.open("NewTux2.png", ios::out | ios::binary);
-            
-            if (output) {
-                // Writing PNG signature into output file
-                output.write(reinterpret_cast<char*>(sign), 8);
-                // Writing all other chunks except IEND
-                for (auto it = otherChunks.begin(); it != otherChunks.end() - 1; ++it) {
-                    uint32_t chunkLen = swapEdian(it->length);
-                    // it->length = swapEdian(it->length);
-                    output.write(reinterpret_cast<const char*>(&chunkLen), 4);
-                    output.write(reinterpret_cast<const char*>(it->type), 4);
-                    output.write(reinterpret_cast<char*>(it->data), it->length);
-                    output.write(reinterpret_cast<const char*>(it->crc), 4);
+
+        unsigned char* deflatedData = p.first;
+        uint32_t deflatedSize = p.second;
+        
+        fstream output;
+        output.open("NewTux2.png", ios::out | ios::binary);
+        
+        if (output.is_open()) {
+            // Writing PNG signature into output file
+            output.write(reinterpret_cast<char*>(sign), 8);
+            // Writing all other chunks except IEND
+            for (auto it = otherChunks.begin(); it != otherChunks.end() - 1; ++it) {
+                uint32_t chunkLen = swapEdian(it->length);
+                output.write(reinterpret_cast<const char*>(&chunkLen), 4);
+                output.write(reinterpret_cast<const char*>(it->type), 4);
+                output.write(reinterpret_cast<char*>(it->data), it->length);
+                output.write(reinterpret_cast<const char*>(it->crc), 4);
+            }
+            uint32_t MAX_SIZE = 8192;
+
+            size_t offset = 0;
+            uint32_t chunkLength = 0;
+            unsigned char* chunkData = nullptr;
+            // Writing all IDAT chunks
+            for (int i = 0 ; i < int(deflatedSize / MAX_SIZE) + 1; ++i) {
+                if (deflatedSize < (i + 1) * MAX_SIZE) {
+                    chunkLength = deflatedSize - (i * MAX_SIZE);
+                } else {
+                    chunkLength = MAX_SIZE;
                 }
-                uint32_t MAX_SIZE = 8192;
-                
+                unsigned char* chunkData = new unsigned char[chunkLength];
+                memcpy(chunkData, (deflatedData + i * MAX_SIZE), chunkLength);
+                uint32_t edianLength = swapEdian(chunkLength);
+                // Writing length of IDAT chunk
+                output.write(reinterpret_cast<char*>(&edianLength), 4);
+                // Writing chunk type
+                output.write("IDAT", 4);
+                // Writing chunk data
+                output.write(reinterpret_cast<char*>(chunkData), chunkLength);
+                // Writing chunk crc
+                uint32_t crc = swapEdian(calculate_crc("IDAT", chunkData, chunkLength));
 
-                size_t offset = 0;
-                uint32_t chunkLength = 0;
-                unsigned char* chunkData = nullptr;
-                // Writing all IDAT chunks
-                for (int i = 0 ; i < int(deflatedSize / MAX_SIZE) + 1; ++i) {
-                    if (deflatedSize < (i + 1) * MAX_SIZE) {
-                        chunkLength = deflatedSize - (i * MAX_SIZE);
-                    } else {
-                        chunkLength = MAX_SIZE;
-                    }
-                    unsigned char* chunkData = new unsigned char[chunkLength];
-                    memcpy(chunkData, (deflatedData + i * MAX_SIZE), chunkLength);
-                    uint32_t edianLength = swapEdian(chunkLength);
-                    // Writing length of IDAT chunk
-                    output.write(reinterpret_cast<char*>(&edianLength), 4);
-                    // Writing chunk type
-                    output.write("IDAT", 4);
-                    // Writing chunk data
-                    output.write(reinterpret_cast<char*>(chunkData), chunkLength);
-                    // Writing chunk crc
-                    uint32_t crc = swapEdian(calculate_crc("IDAT", chunkData, chunkLength));
-
-                    output.write(reinterpret_cast<char*>(&crc), 4);
-                    delete[] chunkData;
+                output.write(reinterpret_cast<char*>(&crc), 4);
+                delete[] chunkData;
             }
 
             // Writing IEND chunk    
@@ -473,49 +586,10 @@ int main() {
             cerr << "Could not open output file\n";
         
         output.close();
-        // ifstream fin("NewTux.txt");
-
-        // // Get length of file
-        // fin.seekg(0, fin.end);
-        // int length = fin.tellg();
-        // fin.seekg(0, fin.beg);
-
-        // char* buffer1 = new char[length];
-        // char* buffer2 = new char[length];
-
-        // fin.read(buffer1, length);
-        // fin.close();
-        // fin.open("NewTux.txt");
-        // fin.read(buffer2, length);
-
-        // std::cout << "Are equal: " << strcmp(buffer1, buffer2) << endl;
-        // fin.close();
-
-        // delete[] buffer1;
-        // delete[] buffer2;
-        // cout << std::hex;
-        // for (size_t i = 0; i < inflatedSize; ++i) {
-        //     cout << std::setfill('0') << std::setw(2)
-        //             << (int)inflatedData[i] << " ";
-            
-        //     if ((i + 1) % 8 == 0)
-        //         cout << "\n";
-        // }
-
-        // std::cout << endl;
-        // cout << std::hex;
-        // for (size_t i = 0; i < compressedSize; ++i) {
-        //     cout << std::setfill('0') << std::setw(2)
-        //             << (int)compressedData[i] << " ";
-            
-        //     if ((i + 1) % 8 == 0)
-        //         cout << "\n";
-        // }
+    
         // Freeing memory
         delete inflatedData;
         delete deflatedData;
-        
-        fs.close(); // Closing image file
     } else 
         cerr << "Could not open file\n";
     
